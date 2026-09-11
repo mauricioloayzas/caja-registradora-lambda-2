@@ -1,0 +1,728 @@
+service: caja-registradora-2
+
+provider:
+  name: aws
+  region: us-east-1
+  runtime: provided.al2023
+  versionFunctions: false
+
+  environment:
+    STAGE: ${opt:stage, 'dev'}
+    DYNAMODB_TABLE_PREFIX_ORCHESTRATOR: orchestrator
+    DYNAMODB_TABLE_PREFIX_CAJA: caja
+
+    DYNAMODB_TABLE_PROFILES: ${self:provider.environment.STAGE}_${self:provider.environment.DYNAMODB_TABLE_PREFIX_ORCHESTRATOR}_profiles
+    DYNAMODB_TABLE_RBACS: ${self:provider.environment.STAGE}_${self:provider.environment.DYNAMODB_TABLE_PREFIX_ORCHESTRATOR}_profiles_rbacs
+
+    DYNAMODB_TABLE_GUIAS_REMISION: ${self:provider.environment.STAGE}_${self:provider.environment.DYNAMODB_TABLE_PREFIX_CAJA}_guias_remision
+    DYNAMODB_TABLE_LIQUIDACIONES_COMPRA: ${self:provider.environment.STAGE}_${self:provider.environment.DYNAMODB_TABLE_PREFIX_CAJA}_liquidaciones_compra
+    DYNAMODB_TABLE_PUNTOS_EMISION: ${self:provider.environment.STAGE}_${self:provider.environment.DYNAMODB_TABLE_PREFIX_CAJA}_puntos_emision
+    DYNAMODB_TABLE_SECUENCIALES: ${self:provider.environment.STAGE}_${self:provider.environment.DYNAMODB_TABLE_PREFIX_CAJA}_secuenciales
+
+    BREF_AUTOLOAD_PATH: /var/task/package/autoload.php
+
+    # Mismo bucket/key de KMS que usa el backend principal para firmar electrónicamente — es
+    # infraestructura compartida (Fn::ImportValue), no depende de cuál de los 2 stacks la usa.
+    SRI_CERTIFICADO_BUCKET: orchestrator-electronic-signs-${self:provider.environment.STAGE}
+    ELECTRONIC_SIGN_KMS_KEY_ARN: !ImportValue "${self:provider.environment.STAGE}-electronic-sign-kms-key-arn"
+
+    NOTIFIER_API_BASE: ${env:NOTIFIER_API_BASE, ''}
+    NOTIFIER_API_KEY: ${env:NOTIFIER_API_KEY, ''}
+    SERVICE_PROFILE_ID: ${env:SERVICE_PROFILE_ID, ''}
+
+  # Comparte la MISMA HTTP API que el backend principal (mismo dominio, mismas URLs — nada
+  # cambia para el frontend ni para nadie que ya llame a caja-registradora). Se referencia por
+  # el id real del stack principal, leído en deploy time vía ${cf:...} — mismo mecanismo de
+  # referencia cruzada entre stacks que ya usa este ecosistema para ELECTRONIC_SIGN_KMS_KEY_ARN,
+  # solo que ahí es Fn::ImportValue (a nivel de recurso CFN) y acá es ${cf:...} (a nivel de
+  # configuración del framework, que es lo que corresponde para provider.httpApi.id).
+  #
+  # OJO: con un httpApi.id externo, Serverless Framework NO permite declarar/crear un authorizer
+  # nuevo acá — cada evento referencia el authorizer del stack principal por su id real
+  # (HttpApiAuthorizerId, agregado como Output ahí para esto). Por eso cada función en
+  # serverless-config/*.yml usa `authorizer: {type: jwt, id: ...}` en vez del atajo por nombre
+  # `authorizer: cognitoAuthorizer` que sí funciona en el stack principal.
+  httpApi:
+    id: ${cf:caja-registradora-${self:provider.environment.STAGE}.HttpApiId}
+
+  iam:
+    role:
+      statements:
+        - Effect: "Allow"
+          Action:
+            - dynamodb:DescribeTable
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_PROFILES}"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_RBACS}"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_RBACS}/index/user_id-index"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_GUIAS_REMISION}"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_GUIAS_REMISION}/index/profile_id-index"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_GUIAS_REMISION}/index/profile_id-created_at-index"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_GUIAS_REMISION}/index/application_id-index"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_LIQUIDACIONES_COMPRA}"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_LIQUIDACIONES_COMPRA}/index/profile_id-index"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_LIQUIDACIONES_COMPRA}/index/profile_id-created_at-index"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_LIQUIDACIONES_COMPRA}/index/application_id-index"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_PUNTOS_EMISION}"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_PUNTOS_EMISION}/index/profile_id-index"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_PUNTOS_EMISION}/index/profile_id-created_at-index"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_PUNTOS_EMISION}/index/profile_id-estab_pto_emi-index"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_SECUENCIALES}"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_SECUENCIALES}/index/profile_id-index"
+        - Effect: "Allow"
+          Action:
+            - s3:GetObject
+          Resource:
+            - "arn:aws:s3:::${self:provider.environment.SRI_CERTIFICADO_BUCKET}/*"
+        - Effect: "Allow"
+          Action:
+            - kms:Decrypt
+          Resource:
+            - ${self:provider.environment.ELECTRONIC_SIGN_KMS_KEY_ARN}
+
+resources:
+  Resources:
+    GuiasRemisionCreateRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          - PolicyName: guias-remision-create-permissions
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                  Resource:
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_PROFILES}"
+                - Effect: Allow
+                  Action:
+                    - dynamodb:Query
+                  Resource:
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_RBACS}"
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_RBACS}/index/user_id-index"
+                - Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:PutItem
+                  Resource:
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_GUIAS_REMISION}"
+                - Effect: Allow
+                  Action:
+                    - dynamodb:Query
+                  Resource:
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_PUNTOS_EMISION}/index/profile_id-estab_pto_emi-index"
+                - Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:UpdateItem
+                  Resource:
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_SECUENCIALES}"
+                - Effect: Allow
+                  Action:
+                    - states:StartExecution
+                  Resource:
+                    - !Ref GuiasRemisionStateMachine
+    GuiasRemisionStateMachineRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: states.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: invoke-guias-remision-lambdas
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action: lambda:InvokeFunction
+                  Resource:
+                    - !GetAtt GuiasDashremisionDashsignLambdaFunction.Arn
+                    - !GetAtt GuiasDashremisionDashsendLambdaFunction.Arn
+                    - !GetAtt GuiasDashremisionDashauthorizeLambdaFunction.Arn
+    GuiasRemisionStateMachine:
+      Type: AWS::StepFunctions::StateMachine
+      Properties:
+        StateMachineName: ${self:provider.environment.STAGE}-guias-remision-procesar-sri
+        RoleArn: !GetAtt GuiasRemisionStateMachineRole.Arn
+        DefinitionString:
+          Fn::Sub:
+            - |
+              {
+                "Comment": "Firma, envia y autoriza una guia de remision ante el SRI. Reintenta la autorizacion mientras el SRI la sigue procesando (estado sigue en 'enviado').",
+                "StartAt": "Firmar",
+                "States": {
+                  "Firmar": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${SignArn}",
+                      "Payload": {
+                        "pathParameters": {
+                          "profile_id.$": "$.profileId",
+                          "guiaId.$": "$.guiaId"
+                        },
+                        "body": "{}"
+                      }
+                    },
+                    "ResultSelector": {
+                      "statusCode.$": "$.Payload.statusCode",
+                      "body.$": "States.StringToJson($.Payload.body)"
+                    },
+                    "ResultPath": "$.firmarResult",
+                    "Retry": [
+                      {
+                        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                        "IntervalSeconds": 2,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "Next": "FirmaExitosa?"
+                  },
+                  "FirmaExitosa?": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.firmarResult.statusCode",
+                        "NumericEquals": 200,
+                        "Next": "Enviar"
+                      }
+                    ],
+                    "Default": "FirmaFallida"
+                  },
+                  "FirmaFallida": {
+                    "Type": "Fail",
+                    "Error": "FirmaFallida",
+                    "Cause": "El paso de firma no respondio statusCode 200"
+                  },
+                  "Enviar": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${SendArn}",
+                      "Payload": {
+                        "pathParameters": {
+                          "profile_id.$": "$.profileId",
+                          "guiaId.$": "$.guiaId"
+                        }
+                      }
+                    },
+                    "ResultSelector": {
+                      "statusCode.$": "$.Payload.statusCode",
+                      "body.$": "States.StringToJson($.Payload.body)"
+                    },
+                    "ResultPath": "$.enviarResult",
+                    "Retry": [
+                      {
+                        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                        "IntervalSeconds": 2,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "Next": "EnvioExitoso?"
+                  },
+                  "EnvioExitoso?": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.enviarResult.statusCode",
+                        "NumericEquals": 200,
+                        "Next": "RevisarEstadoEnvio"
+                      }
+                    ],
+                    "Default": "EnvioFallido"
+                  },
+                  "EnvioFallido": {
+                    "Type": "Fail",
+                    "Error": "EnvioFallido",
+                    "Cause": "El paso de envio al SRI no respondio statusCode 200"
+                  },
+                  "RevisarEstadoEnvio": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.enviarResult.body.data.estado",
+                        "StringEquals": "enviado",
+                        "Next": "EsperarAntesDeAutorizar"
+                      },
+                      {
+                        "Variable": "$.enviarResult.body.data.estado",
+                        "StringEquals": "rechazado",
+                        "Next": "RechazadoEnEnvio"
+                      }
+                    ],
+                    "Default": "EnvioEstadoInesperado"
+                  },
+                  "EnvioEstadoInesperado": {
+                    "Type": "Fail",
+                    "Error": "EnvioEstadoInesperado",
+                    "Cause": "El documento quedo en un estado inesperado tras el envio al SRI"
+                  },
+                  "RechazadoEnEnvio": {
+                    "Type": "Succeed"
+                  },
+                  "EsperarAntesDeAutorizar": {
+                    "Type": "Wait",
+                    "Seconds": 10,
+                    "Next": "Autorizar"
+                  },
+                  "Autorizar": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${AuthorizeArn}",
+                      "Payload": {
+                        "pathParameters": {
+                          "profile_id.$": "$.profileId",
+                          "guiaId.$": "$.guiaId"
+                        }
+                      }
+                    },
+                    "ResultSelector": {
+                      "statusCode.$": "$.Payload.statusCode",
+                      "body.$": "States.StringToJson($.Payload.body)"
+                    },
+                    "ResultPath": "$.autorizarResult",
+                    "Retry": [
+                      {
+                        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                        "IntervalSeconds": 2,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "Next": "AutorizacionExitosa?"
+                  },
+                  "AutorizacionExitosa?": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.autorizarResult.statusCode",
+                        "NumericEquals": 200,
+                        "Next": "RevisarEstadoAutorizacion"
+                      }
+                    ],
+                    "Default": "AutorizacionFallida"
+                  },
+                  "AutorizacionFallida": {
+                    "Type": "Fail",
+                    "Error": "AutorizacionFallida",
+                    "Cause": "El paso de autorizacion no respondio statusCode 200"
+                  },
+                  "RevisarEstadoAutorizacion": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.autorizarResult.body.data.estado",
+                        "StringEquals": "autorizado",
+                        "Next": "Autorizado"
+                      },
+                      {
+                        "Variable": "$.autorizarResult.body.data.estado",
+                        "StringEquals": "rechazado",
+                        "Next": "RechazadoEnAutorizacion"
+                      },
+                      {
+                        "Variable": "$.autorizarResult.body.data.estado",
+                        "StringEquals": "enviado",
+                        "Next": "RevisarIntentos"
+                      }
+                    ],
+                    "Default": "AutorizacionEstadoInesperado"
+                  },
+                  "AutorizacionEstadoInesperado": {
+                    "Type": "Fail",
+                    "Error": "AutorizacionEstadoInesperado",
+                    "Cause": "El documento quedo en un estado inesperado tras consultar la autorizacion"
+                  },
+                  "Autorizado": {
+                    "Type": "Succeed"
+                  },
+                  "RechazadoEnAutorizacion": {
+                    "Type": "Succeed"
+                  },
+                  "RevisarIntentos": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.intentos",
+                        "NumericLessThan": 5,
+                        "Next": "IncrementarIntentos"
+                      }
+                    ],
+                    "Default": "MaxIntentosAlcanzado"
+                  },
+                  "MaxIntentosAlcanzado": {
+                    "Type": "Succeed"
+                  },
+                  "IncrementarIntentos": {
+                    "Type": "Pass",
+                    "Parameters": {
+                      "profileId.$": "$.profileId",
+                      "guiaId.$": "$.guiaId",
+                      "intentos.$": "States.MathAdd($.intentos, 1)"
+                    },
+                    "Next": "EsperarReintento"
+                  },
+                  "EsperarReintento": {
+                    "Type": "Wait",
+                    "Seconds": 15,
+                    "Next": "Autorizar"
+                  }
+                }
+              }
+            - SignArn: !GetAtt GuiasDashremisionDashsignLambdaFunction.Arn
+              SendArn: !GetAtt GuiasDashremisionDashsendLambdaFunction.Arn
+              AuthorizeArn: !GetAtt GuiasDashremisionDashauthorizeLambdaFunction.Arn
+    LiquidacionesCompraCreateRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          - PolicyName: liquidaciones-compra-create-permissions
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                  Resource:
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_PROFILES}"
+                - Effect: Allow
+                  Action:
+                    - dynamodb:Query
+                  Resource:
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_RBACS}"
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_RBACS}/index/user_id-index"
+                - Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:PutItem
+                  Resource:
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_LIQUIDACIONES_COMPRA}"
+                - Effect: Allow
+                  Action:
+                    - dynamodb:Query
+                  Resource:
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_PUNTOS_EMISION}/index/profile_id-estab_pto_emi-index"
+                - Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:UpdateItem
+                  Resource:
+                    - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE_SECUENCIALES}"
+                - Effect: Allow
+                  Action:
+                    - states:StartExecution
+                  Resource:
+                    - !Ref LiquidacionesCompraStateMachine
+    LiquidacionesCompraStateMachineRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: states.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: invoke-liquidaciones-compra-lambdas
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action: lambda:InvokeFunction
+                  Resource:
+                    - !GetAtt LiquidacionesDashsignLambdaFunction.Arn
+                    - !GetAtt LiquidacionesDashsendLambdaFunction.Arn
+                    - !GetAtt LiquidacionesDashauthorizeLambdaFunction.Arn
+    LiquidacionesCompraStateMachine:
+      Type: AWS::StepFunctions::StateMachine
+      Properties:
+        StateMachineName: ${self:provider.environment.STAGE}-liquidaciones-compra-procesar-sri
+        RoleArn: !GetAtt LiquidacionesCompraStateMachineRole.Arn
+        DefinitionString:
+          Fn::Sub:
+            - |
+              {
+                "Comment": "Firma, envia y autoriza una liquidacion de compra ante el SRI. Reintenta la autorizacion mientras el SRI la sigue procesando (estado sigue en 'enviado').",
+                "StartAt": "Firmar",
+                "States": {
+                  "Firmar": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${SignArn}",
+                      "Payload": {
+                        "pathParameters": {
+                          "profile_id.$": "$.profileId",
+                          "liquidacionId.$": "$.liquidacionId"
+                        },
+                        "body": "{}"
+                      }
+                    },
+                    "ResultSelector": {
+                      "statusCode.$": "$.Payload.statusCode",
+                      "body.$": "States.StringToJson($.Payload.body)"
+                    },
+                    "ResultPath": "$.firmarResult",
+                    "Retry": [
+                      {
+                        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                        "IntervalSeconds": 2,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "Next": "FirmaExitosa?"
+                  },
+                  "FirmaExitosa?": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.firmarResult.statusCode",
+                        "NumericEquals": 200,
+                        "Next": "Enviar"
+                      }
+                    ],
+                    "Default": "FirmaFallida"
+                  },
+                  "FirmaFallida": {
+                    "Type": "Fail",
+                    "Error": "FirmaFallida",
+                    "Cause": "El paso de firma no respondio statusCode 200"
+                  },
+                  "Enviar": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${SendArn}",
+                      "Payload": {
+                        "pathParameters": {
+                          "profile_id.$": "$.profileId",
+                          "liquidacionId.$": "$.liquidacionId"
+                        }
+                      }
+                    },
+                    "ResultSelector": {
+                      "statusCode.$": "$.Payload.statusCode",
+                      "body.$": "States.StringToJson($.Payload.body)"
+                    },
+                    "ResultPath": "$.enviarResult",
+                    "Retry": [
+                      {
+                        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                        "IntervalSeconds": 2,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "Next": "EnvioExitoso?"
+                  },
+                  "EnvioExitoso?": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.enviarResult.statusCode",
+                        "NumericEquals": 200,
+                        "Next": "RevisarEstadoEnvio"
+                      }
+                    ],
+                    "Default": "EnvioFallido"
+                  },
+                  "EnvioFallido": {
+                    "Type": "Fail",
+                    "Error": "EnvioFallido",
+                    "Cause": "El paso de envio al SRI no respondio statusCode 200"
+                  },
+                  "RevisarEstadoEnvio": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.enviarResult.body.data.estado",
+                        "StringEquals": "enviado",
+                        "Next": "EsperarAntesDeAutorizar"
+                      },
+                      {
+                        "Variable": "$.enviarResult.body.data.estado",
+                        "StringEquals": "rechazado",
+                        "Next": "RechazadoEnEnvio"
+                      }
+                    ],
+                    "Default": "EnvioEstadoInesperado"
+                  },
+                  "EnvioEstadoInesperado": {
+                    "Type": "Fail",
+                    "Error": "EnvioEstadoInesperado",
+                    "Cause": "El documento quedo en un estado inesperado tras el envio al SRI"
+                  },
+                  "RechazadoEnEnvio": {
+                    "Type": "Succeed"
+                  },
+                  "EsperarAntesDeAutorizar": {
+                    "Type": "Wait",
+                    "Seconds": 10,
+                    "Next": "Autorizar"
+                  },
+                  "Autorizar": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${AuthorizeArn}",
+                      "Payload": {
+                        "pathParameters": {
+                          "profile_id.$": "$.profileId",
+                          "liquidacionId.$": "$.liquidacionId"
+                        }
+                      }
+                    },
+                    "ResultSelector": {
+                      "statusCode.$": "$.Payload.statusCode",
+                      "body.$": "States.StringToJson($.Payload.body)"
+                    },
+                    "ResultPath": "$.autorizarResult",
+                    "Retry": [
+                      {
+                        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                        "IntervalSeconds": 2,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "Next": "AutorizacionExitosa?"
+                  },
+                  "AutorizacionExitosa?": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.autorizarResult.statusCode",
+                        "NumericEquals": 200,
+                        "Next": "RevisarEstadoAutorizacion"
+                      }
+                    ],
+                    "Default": "AutorizacionFallida"
+                  },
+                  "AutorizacionFallida": {
+                    "Type": "Fail",
+                    "Error": "AutorizacionFallida",
+                    "Cause": "El paso de autorizacion no respondio statusCode 200"
+                  },
+                  "RevisarEstadoAutorizacion": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.autorizarResult.body.data.estado",
+                        "StringEquals": "autorizado",
+                        "Next": "Autorizado"
+                      },
+                      {
+                        "Variable": "$.autorizarResult.body.data.estado",
+                        "StringEquals": "rechazado",
+                        "Next": "RechazadoEnAutorizacion"
+                      },
+                      {
+                        "Variable": "$.autorizarResult.body.data.estado",
+                        "StringEquals": "enviado",
+                        "Next": "RevisarIntentos"
+                      }
+                    ],
+                    "Default": "AutorizacionEstadoInesperado"
+                  },
+                  "AutorizacionEstadoInesperado": {
+                    "Type": "Fail",
+                    "Error": "AutorizacionEstadoInesperado",
+                    "Cause": "El documento quedo en un estado inesperado tras consultar la autorizacion"
+                  },
+                  "Autorizado": {
+                    "Type": "Succeed"
+                  },
+                  "RechazadoEnAutorizacion": {
+                    "Type": "Succeed"
+                  },
+                  "RevisarIntentos": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.intentos",
+                        "NumericLessThan": 5,
+                        "Next": "IncrementarIntentos"
+                      }
+                    ],
+                    "Default": "MaxIntentosAlcanzado"
+                  },
+                  "MaxIntentosAlcanzado": {
+                    "Type": "Succeed"
+                  },
+                  "IncrementarIntentos": {
+                    "Type": "Pass",
+                    "Parameters": {
+                      "profileId.$": "$.profileId",
+                      "liquidacionId.$": "$.liquidacionId",
+                      "intentos.$": "States.MathAdd($.intentos, 1)"
+                    },
+                    "Next": "EsperarReintento"
+                  },
+                  "EsperarReintento": {
+                    "Type": "Wait",
+                    "Seconds": 15,
+                    "Next": "Autorizar"
+                  }
+                }
+              }
+            - SignArn: !GetAtt LiquidacionesDashsignLambdaFunction.Arn
+              SendArn: !GetAtt LiquidacionesDashsendLambdaFunction.Arn
+              AuthorizeArn: !GetAtt LiquidacionesDashauthorizeLambdaFunction.Arn
+
+plugins:
+    - ./vendor/bref/bref
+
+custom:
+  vendorLayerArn: ${file(.vendor-layer-arn)}
+
+package:
+  patterns:
+    - '!**'
+    - 'services/**'
+    - 'package/**'
+    - 'vendor/guzzlehttp/**'
+    - 'vendor/psr/http-client/**'
+    - 'vendor/psr/http-factory/**'
+    - 'vendor/psr/http-message/**'
+    - 'vendor/ralouphie/**'
+    - 'vendor/composer/**'
+    - 'vendor/autoload.php'
+    - 'vendor/liberias-sri/**'
+
+functions:
+  - ${file(serverless-config/guia-remision.yml)}
+  - ${file(serverless-config/liquidacion-compra.yml)}

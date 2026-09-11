@@ -1,0 +1,65 @@
+<?php
+
+require_once file_exists('/opt/vendor/autoload.php') ? '/opt/vendor/autoload.php' : __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../package/autoload.php';
+
+use App\Common\Repositories\GuiaRemisionRepository;
+use App\Common\Services\SriService;
+use App\Common\Services\SriFailureAlertService;
+use App\Common\Http\ProfileAccessMiddleware;
+
+return function (array $event) {
+    $profileId = $event['pathParameters']['profile_id'] ?? null;
+    $docId     = $event['pathParameters']['guiaId'] ?? null;
+
+    if (empty($profileId) || empty($docId)) {
+        return ['statusCode' => 400, 'body' => json_encode(['error' => 'Missing required path parameters'])];
+    }
+
+    $forbidden = ProfileAccessMiddleware::check($event, $profileId);
+    if ($forbidden) {
+        return $forbidden;
+    }
+
+    try {
+        $repo = new GuiaRemisionRepository();
+        $doc  = $repo->get($docId);
+
+        if (!$doc) {
+            return ['statusCode' => 404, 'body' => json_encode(['error' => 'Document not found'])];
+        }
+
+        if (empty($doc->clave_acceso)) {
+            return ['statusCode' => 409, 'body' => json_encode(['error' => 'El documento no tiene clave de acceso'])];
+        }
+
+        $sriService   = new SriService();
+        $respuestaSri = $sriService->autorizarSri($doc->clave_acceso, $doc->info_tributaria->ambiente->value);
+
+        $autorizacion = $respuestaSri['autorizaciones']['autorizacion'][0] ?? null;
+
+        if ($autorizacion && ($autorizacion['estado'] ?? '') === 'AUTORIZADO') {
+            $doc = $repo->updateAutorizacion(
+                $docId,
+                $autorizacion['numeroAutorizacion'] ?? '',
+                $autorizacion['fechaAutorizacion'] ?? date('c'),
+                json_encode($respuestaSri)
+            );
+        } elseif ($autorizacion) {
+            // El SRI ya resolvió la autorización y no fue AUTORIZADO (ej. NO AUTORIZADO).
+            // Si $autorizacion es null, todavía está en proceso y no se toca el estado.
+            $doc = $repo->updateRechazo($docId, json_encode($respuestaSri));
+            SriFailureAlertService::notificar('guía de remisión', 'autorizacion', $profileId, $doc->clave_acceso, json_encode($respuestaSri));
+        }
+
+        return [
+            'statusCode' => 200,
+            'headers'    => ['Content-Type' => 'application/json'],
+            'body'       => json_encode(['data' => $doc->toArray(), 'respuesta_sri' => $respuestaSri]),
+        ];
+
+    } catch (\Exception $e) {
+        SriFailureAlertService::notificar('guía de remisión', 'autorizacion', $profileId, $doc->clave_acceso ?? $docId, $e->getMessage());
+        return ['statusCode' => 500, 'body' => json_encode(['error' => $e->getMessage()])];
+    }
+};

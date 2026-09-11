@@ -1,0 +1,128 @@
+liquidaciones-getAll:
+  handler: services/liquidaciones-compra/getAll.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Lista todas las liquidaciones de compra de un perfil"
+  events:
+    - httpApi:
+        method: GET
+        path: /profiles/{profile_id}/liquidaciones-compra
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+liquidaciones-get:
+  handler: services/liquidaciones-compra/get.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Obtiene una liquidación de compra por ID"
+  events:
+    - httpApi:
+        method: GET
+        path: /profiles/{profile_id}/liquidaciones-compra/{liquidacionId}
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+liquidaciones-create:
+  handler: services/liquidaciones-compra/create.php
+  runtime: php-84
+  role: !GetAtt LiquidacionesCompraCreateRole.Arn
+  environment:
+    LIQUIDACIONES_COMPRA_STATE_MACHINE_ARN: !Ref LiquidacionesCompraStateMachine
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Crea y genera el XML de una liquidación de compra, y arranca el procesamiento automático (firmar/enviar/autorizar) vía Step Functions"
+  events:
+    - httpApi:
+        method: POST
+        path: /profiles/{profile_id}/liquidaciones-compra
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+liquidaciones-getByApplicationId:
+  handler: services/liquidaciones-compra/getByApplicationId.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Lista liquidaciones de compra por application ID"
+  events:
+    - httpApi:
+        method: GET
+        path: /profiles/{profile_id}/liquidaciones-compra/application/{applicationId}
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+liquidaciones-updateStatus:
+  handler: services/liquidaciones-compra/updateStatus.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Actualiza el estado de una liquidación de compra"
+  events:
+    - httpApi:
+        method: PATCH
+        path: /profiles/{profile_id}/liquidaciones-compra/{liquidacionId}/status
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+liquidaciones-delete:
+  handler: services/liquidaciones-compra/delete.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Elimina una liquidación de compra en estado borrador"
+  events:
+    - httpApi:
+        method: DELETE
+        path: /profiles/{profile_id}/liquidaciones-compra/{liquidacionId}
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+liquidaciones-sign:
+  handler: services/liquidaciones-compra/sign.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Firma electrónicamente una liquidación de compra"
+  events:
+    - httpApi:
+        method: POST
+        path: /profiles/{profile_id}/liquidaciones-compra/{liquidacionId}/sign
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+liquidaciones-send:
+  handler: services/liquidaciones-compra/send.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Envía la liquidación de compra firmada al SRI"
+  events:
+    - httpApi:
+        method: POST
+        path: /profiles/{profile_id}/liquidaciones-compra/{liquidacionId}/send
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+liquidaciones-authorize:
+  handler: services/liquidaciones-compra/authorize.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Consulta la autorización de una liquidación de compra en el SRI"
+  events:
+    - httpApi:
+        method: POST
+        path: /profiles/{profile_id}/liquidaciones-compra/{liquidacionId}/authorize
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}

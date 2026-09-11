@@ -1,0 +1,128 @@
+guias-remision-getAll:
+  handler: services/guias-remision/getAll.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Lista todas las guías de remisión de un perfil"
+  events:
+    - httpApi:
+        method: GET
+        path: /profiles/{profile_id}/guias-remision
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+guias-remision-get:
+  handler: services/guias-remision/get.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Obtiene una guía de remisión por ID"
+  events:
+    - httpApi:
+        method: GET
+        path: /profiles/{profile_id}/guias-remision/{guiaId}
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+guias-remision-create:
+  handler: services/guias-remision/create.php
+  runtime: php-84
+  role: !GetAtt GuiasRemisionCreateRole.Arn
+  environment:
+    GUIAS_REMISION_STATE_MACHINE_ARN: !Ref GuiasRemisionStateMachine
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Crea y genera el XML de una guía de remisión, y arranca el procesamiento automático (firmar/enviar/autorizar) vía Step Functions"
+  events:
+    - httpApi:
+        method: POST
+        path: /profiles/{profile_id}/guias-remision
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+guias-remision-getByApplicationId:
+  handler: services/guias-remision/getByApplicationId.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Lista guías de remisión por application ID"
+  events:
+    - httpApi:
+        method: GET
+        path: /profiles/{profile_id}/guias-remision/application/{applicationId}
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+guias-remision-updateStatus:
+  handler: services/guias-remision/updateStatus.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Actualiza el estado de una guía de remisión"
+  events:
+    - httpApi:
+        method: PATCH
+        path: /profiles/{profile_id}/guias-remision/{guiaId}/status
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+guias-remision-delete:
+  handler: services/guias-remision/delete.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Elimina una guía de remisión en estado borrador"
+  events:
+    - httpApi:
+        method: DELETE
+        path: /profiles/{profile_id}/guias-remision/{guiaId}
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+guias-remision-sign:
+  handler: services/guias-remision/sign.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Firma electrónicamente una guía de remisión"
+  events:
+    - httpApi:
+        method: POST
+        path: /profiles/{profile_id}/guias-remision/{guiaId}/sign
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+guias-remision-send:
+  handler: services/guias-remision/send.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Envía la guía de remisión firmada al SRI"
+  events:
+    - httpApi:
+        method: POST
+        path: /profiles/{profile_id}/guias-remision/{guiaId}/send
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
+
+guias-remision-authorize:
+  handler: services/guias-remision/authorize.php
+  runtime: php-84
+  layers:
+    - ${self:custom.vendorLayerArn}
+  description: "Consulta la autorización de una guía de remisión en el SRI"
+  events:
+    - httpApi:
+        method: POST
+        path: /profiles/{profile_id}/guias-remision/{guiaId}/authorize
+        authorizer:
+          type: jwt
+          id: ${cf:caja-registradora-${opt:stage, 'dev'}.HttpApiAuthorizerId}
